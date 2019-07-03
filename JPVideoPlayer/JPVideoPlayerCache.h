@@ -5,48 +5,58 @@
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
  *
- * Click https://github.com/Chris-Pan
+ * Click https://github.com/newyjp
  * or http://www.jianshu.com/users/e2f2d779c022/latest_articles to contact me.
  */
-
 
 #import <Foundation/Foundation.h>
 #import "JPVideoPlayerCompat.h"
 
-@class JPVideoPlayerCacheConfig;
+NS_ASSUME_NONNULL_BEGIN
 
-typedef NS_ENUM(NSInteger, JPVideoPlayerCacheType) {
-   
+@interface JPVideoPlayerCacheConfiguration : NSObject
+
+/**
+ * The maximum length of time to keep an video in the cache, in seconds
+ */
+@property (assign, nonatomic) NSInteger maxCacheAge;
+
+/**
+ * The maximum size of the cache, in bytes.
+ * If the cache Beyond this value, it will delete the video file by the cache time automatic.
+ */
+@property (assign, nonatomic) NSUInteger maxCacheSize;
+
+/**
+ *  disable iCloud backup [defaults to YES]
+ */
+@property (assign, nonatomic) BOOL shouldDisableiCloud;
+
+@end
+
+typedef NS_ENUM(NSInteger, JPVideoPlayerCacheType)   {
+    
     /**
-     * The video wasn't available the JPVideoPlayer caches, but was downloaded from the web.
+     * The video wasn't available the JPVideoPlayer caches.
      */
     JPVideoPlayerCacheTypeNone,
-    
+
     /**
-     * The video was obtained from the disk cache.
+     * The video was obtained on the disk cache.
      */
-    JPVideoPlayerCacheTypeDisk,
-    
+    JPVideoPlayerCacheTypeExisted,
+
     /**
-     * The video was obtained from local file.
+     * A location source.
      */
     JPVideoPlayerCacheTypeLocation
 };
 
-typedef void(^JPVideoPlayerCacheQueryCompletedBlock)(NSString * _Nullable videoPath, JPVideoPlayerCacheType cacheType);
+typedef void(^JPVideoPlayerCacheQueryCompletion)(NSString * _Nullable videoPath, JPVideoPlayerCacheType cacheType);
 
-typedef void(^JPVideoPlayerCheckCacheCompletionBlock)(BOOL isInDiskCache);
+typedef void(^JPVideoPlayerCheckCacheCompletion)(BOOL isInDiskCache);
 
-typedef void(^JPVideoPlayerCalculateSizeBlock)(NSUInteger fileCount, NSUInteger totalSize);
-
-typedef void(^JPVideoPlayerNoParamsBlock)();
-
-typedef void(^JPVideoPlayerStoreDataFinishedBlock)(NSUInteger storedSize, NSError * _Nullable error, NSString * _Nullable fullVideoCachePath);
-
-
-@interface JPVideoPlayerCacheToken : NSObject
-
-@end
+typedef void(^JPVideoPlayerCalculateSizeCompletion)(NSUInteger fileCount, NSUInteger totalSize);
 
 /**
  * JPVideoPlayerCache maintains a disk cache. Disk cache write operations are performed
@@ -59,111 +69,82 @@ typedef void(^JPVideoPlayerStoreDataFinishedBlock)(NSUInteger storedSize, NSErro
 /**
  *  Cache Config object - storing all kind of settings.
  */
-@property (nonatomic, nonnull, readonly)JPVideoPlayerCacheConfig *config;
+@property (nonatomic, readonly) JPVideoPlayerCacheConfiguration *cacheConfiguration;
+
+/**
+ * Init with given cacheConfig.
+ *
+ * @see `JPVideoPlayerCacheConfig`.
+ */
+- (instancetype)initWithCacheConfiguration:(JPVideoPlayerCacheConfiguration * _Nullable)cacheConfiguration NS_DESIGNATED_INITIALIZER;
 
 /**
  * Returns global shared cache instance.
  *
  * @return JPVideoPlayerCache global instance.
  */
-+ (nonnull instancetype)sharedCache;
++ (instancetype)sharedCache;
 
-
-# pragma mark - Store Video Options
-
-/**
- * Asynchronously store a piece of video data into disk cache for the given key.
- *
- * @param videoData       The video data as returned by the server, it is a piece of full video file.
- * @param key             The unique video cache key, usually it's video absolute URL
- * @param completionBlock A block executed after the operation is finished.
- *                        The first paramater is the cached video data size. the second paramater is the possiable error.
- *                        the last paramater is the full cache video data path, it is nil until the video data download finished.
- *
- * @return A token (@see JPVideoPlayerCacheToken) that can be passed to -cancel: to cancel this operation.
- */
-- (nullable JPVideoPlayerCacheToken *)storeVideoData:(nullable NSData *)videoData expectedSize:(NSUInteger)expectedSize forKey:(nullable NSString *)key completion:(nullable JPVideoPlayerStoreDataFinishedBlock)completionBlock;
-
-/**
- * Cancels a cache that was previously queued using -storeVideoData:expectedSize:progress:forKey:completion:.
- *
- * @param token The token received from -storeVideoData:expectedSize:progress:forKey:completion: that should be canceled.
- */
-- (void)cancel:(nullable JPVideoPlayerCacheToken *)token;
-
-/**
- * This method is be used to cancel current completion block when cache a peice of video data finished.
- */
-- (void)cancelCurrentComletionBlock;
-
-
-# pragma - Query and Retrieve Options
+# pragma mark - Query and Retrieve Options
 /**
  * Async check if video exists in disk cache already (does not load the video).
  *
- * @param key             the key describing the url.
- * @param completionBlock the block to be executed when the check is done.
+ * @param key             The key describing the url.
+ * @param completion      The block to be executed when the check is done.
  * @note the completion block will be always executed on the main queue.
  */
-- (void)diskVideoExistsWithKey:(nullable NSString *)key completion:(nullable JPVideoPlayerCheckCacheCompletionBlock)completionBlock;
+- (void)diskVideoExistsWithKey:(NSString *)key
+                    completion:(JPVideoPlayerCheckCacheCompletion _Nullable)completion;
 
 /**
  * Operation that queries the cache asynchronously and call the completion when done.
  *
- * @param key       The unique key used to store the wanted video.
- * @param doneBlock The completion block. Will not get called if the operation is cancelled.
- *
- * @return a NSOperation instance containing the cache options.
+ * @param key        The unique key used to store the wanted video.
+ * @param completion The completion block. Will not get called if the operation is cancelled.
  */
-- (nullable NSOperation *)queryCacheOperationForKey:(nullable NSString *)key done:(nullable JPVideoPlayerCacheQueryCompletedBlock)doneBlock;
+- (void)queryCacheOperationForKey:(NSString *)key
+                       completion:(JPVideoPlayerCacheQueryCompletion _Nullable)completion;
 
 /**
  * Async check if video exists in disk cache already (does not load the video).
  *
- * @param fullVideoCachePath the path need to check in disk.
+ * @param path The path need to check in disk.
  *
- * @return if the file is existed for given video path, return YES, return NO, otherwise. 
+ * @return If the file is existed for given video path, return YES, return NO, otherwise.
  */
-- (BOOL)diskVideoExistsWithPath:(NSString * _Nullable)fullVideoCachePath;
+- (BOOL)diskVideoExistsOnPath:(NSString *)path;
 
-
-# pragma - Clear Cache Events
+# pragma mark - Clear Cache Events
 
 /**
  * Remove the video data from disk cache asynchronously
  *
- * @param key             The unique video cache key.
- * @param completion      A block that should be executed after the video has been removed (optional).
+ * @param key         The unique video cache key.
+ * @param completion  A block that should be executed after the video has been removed (optional).
  */
-- (void)removeFullCacheForKey:(nullable NSString *)key withCompletion:(nullable JPVideoPlayerNoParamsBlock)completion;
-
-/**
- * Clear the temporary cache video for given key.
- *
- * @param key  The unique flag for the given url in this framework.
- * @param completion      A block that should be executed after the video has been removed (optional).
- */
-- (void)removeTempCacheForKey:(NSString * _Nonnull)key withCompletion:(nullable JPVideoPlayerNoParamsBlock)completion;
+- (void)removeVideoCacheForKey:(NSString *)key
+                   completion:(dispatch_block_t _Nullable)completion;
 
 /**
  * Async remove all expired cached video from disk. Non-blocking method - returns immediately.
  *
- * @param completionBlock A block that should be executed after cache expiration completes (optional)
+ * @param completion A block that should be executed after cache expiration completes (optional)
  */
-- (void)deleteOldFilesWithCompletionBlock:(nullable JPVideoPlayerNoParamsBlock)completionBlock;
-
-/**
- * Async delete all temporary cached videos. Non-blocking method - returns immediately.
- * @param completion    A block that should be executed after cache expiration completes (optional).
- */
-- (void)deleteAllTempCacheOnCompletion:(nullable JPVideoPlayerNoParamsBlock)completion;
+- (void)deleteOldFilesOnCompletion:(dispatch_block_t _Nullable)completion;
 
 /**
  * Async clear all disk cached videos. Non-blocking method - returns immediately.
+ *
  * @param completion    A block that should be executed after cache expiration completes (optional).
  */
-- (void)clearDiskOnCompletion:(nullable JPVideoPlayerNoParamsBlock)completion;
+- (void)clearDiskOnCompletion:(dispatch_block_t _Nullable)completion;
 
+/**
+ * Async clear videos cache in disk on version 2.x.
+ *
+ * @param completion A block that should be executed after cache expiration completes (optional).
+ */
+- (void)clearVideoCacheOnVersion2OnCompletion:(dispatch_block_t _Nullable)completion;
 
 # pragma mark - Cache Info
 
@@ -196,8 +177,7 @@ typedef void(^JPVideoPlayerStoreDataFinishedBlock)(NSUInteger storedSize, NSErro
 /**
  * Calculate the disk cache's size, asynchronously .
  */
-- (void)calculateSizeWithCompletionBlock:(nullable JPVideoPlayerCalculateSizeBlock)completionBlock;
-
+- (void)calculateSizeOnCompletion:(JPVideoPlayerCalculateSizeCompletion _Nullable)completion;
 
 # pragma mark - File Name
 
@@ -206,6 +186,36 @@ typedef void(^JPVideoPlayerStoreDataFinishedBlock)(NSUInteger storedSize, NSErro
  *
  *  @return the file's name.
  */
-- (nullable NSString *)cacheFileNameForKey:(nullable NSString *)key;
+- (NSString *)cacheFileNameForKey:(NSString *)key;
 
 @end
+
+@interface JPVideoPlayerCache(Deprecated)
+
+/**
+ * Remove the video data from disk cache asynchronously
+ *
+ * @param key             The unique video cache key.
+ * @param completion      A block that should be executed after the video has been removed (optional).
+ */
+- (void)removeFullCacheForKey:(NSString *)key
+                   completion:(dispatch_block_t _Nullable)completion JPDEPRECATED_ATTRIBUTE("`removeFullCacheForKey:completion:` is deprecated on 3.0.")
+
+/**
+ * Clear the temporary cache video for given key.
+ *
+ * @param key        The unique flag for the given url in this framework.
+ * @param completion A block that should be executed after the video has been removed (optional).
+ */
+- (void)removeTempCacheForKey:(NSString *)key
+                   completion:(nullable dispatch_block_t)completion JPDEPRECATED_ATTRIBUTE("`removeTempCacheForKey:completion:` is deprecated on 3.0.")
+
+/**
+ * Async delete all temporary cached videos. Non-blocking method - returns immediately.
+ * @param completion    A block that should be executed after cache expiration completes (optional).
+ */
+- (void)deleteAllTempCacheOnCompletion:(dispatch_block_t _Nullable)completion JPDEPRECATED_ATTRIBUTE("`deleteAllTempCacheOnCompletion:` is deprecated on 3.0.");
+
+@end
+
+NS_ASSUME_NONNULL_END

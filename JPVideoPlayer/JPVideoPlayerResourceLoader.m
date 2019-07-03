@@ -5,156 +5,308 @@
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
  *
- * Click https://github.com/Chris-Pan
+ * Click https://github.com/newyjp
  * or http://www.jianshu.com/users/e2f2d779c022/latest_articles to contact me.
  */
 
-
 #import "JPVideoPlayerResourceLoader.h"
-#import <MobileCoreServices/MobileCoreServices.h>
+#import "JPVideoPlayerCompat.h"
+#import "JPVideoPlayerCacheFile.h"
+#import "JPVideoPlayerCachePath.h"
+#import "JPVideoPlayerManager.h"
+#import "JPResourceLoadingRequestTask.h"
+#import "JPVideoPlayerSupportUtils.h"
+#import <pthread.h>
 
-@interface JPVideoPlayerResourceLoader()
+@interface JPVideoPlayerResourceLoader()<JPResourceLoadingRequestTaskDelegate>
 
-/**
- * The request queues.
- * It save the requests waiting for being given video data.
- */
-@property (nonatomic, strong, nullable)NSMutableArray *pendingRequests;
+@property (nonatomic, strong)NSMutableArray<AVAssetResourceLoadingRequest *> *loadingRequests;
 
-/**
- * The video data total length.
- */
-@property(nonatomic, assign)NSUInteger expectedSize;
+@property (nonatomic, strong) AVAssetResourceLoadingRequest *runningLoadingRequest;
 
-/**
- * The video data cached in disk.
- */
-@property(nonatomic, assign)NSUInteger receivedSize;
+@property (nonatomic, strong) JPVideoPlayerCacheFile *cacheFile;
 
-/**
- * The cache video data temporary cache path in disk.
- */
-@property(nonatomic, strong, nullable)NSString *tempCacheVideoPath;
+@property (nonatomic, strong) NSMutableArray<JPResourceLoadingRequestTask *> *requestTasks;
+
+@property (nonatomic, strong) JPResourceLoadingRequestTask *runningRequestTask;
+
+@property (nonatomic) pthread_mutex_t lock;
+
+@property (nonatomic, strong) dispatch_queue_t ioQueue;
 
 @end
 
-static NSString *JPVideoPlayerMimeType = @"video/mp4";
 @implementation JPVideoPlayerResourceLoader
 
-- (instancetype)init{
+- (void)dealloc {
+    if(self.runningRequestTask){
+        [self.runningRequestTask cancel];
+        [self removeCurrentRequestTaskAndResetAll];
+    }
+    self.loadingRequests = nil;
+    pthread_mutex_destroy(&_lock);
+}
+
+- (instancetype)init {
+    NSAssert(NO, @"Please use given initialize method.");
+    return [self initWithCustomURL:[NSURL new]];
+}
+
++ (instancetype)resourceLoaderWithCustomURL:(NSURL *)customURL {
+    return [[JPVideoPlayerResourceLoader alloc] initWithCustomURL:customURL];
+}
+
+- (instancetype)initWithCustomURL:(NSURL *)customURL {
+    if(!customURL){
+        JPErrorLog(@"customURL can not be nil");
+        return nil;
+    }
+
     self = [super init];
-    if (self) {
-        self.pendingRequests = [NSMutableArray array];
+    if(self){
+        pthread_mutexattr_t mutexattr;
+        pthread_mutexattr_init(&mutexattr);
+        pthread_mutexattr_settype(&mutexattr, PTHREAD_MUTEX_RECURSIVE);
+        pthread_mutex_init(&_lock, &mutexattr);
+        _ioQueue = dispatch_queue_create("com.NewPan.jpvideoplayer.resource.loader.www", DISPATCH_QUEUE_SERIAL);
+        _customURL = customURL;
+        _loadingRequests = [@[] mutableCopy];
+        NSString *key = [JPVideoPlayerManager.sharedManager cacheKeyForURL:customURL];
+        _cacheFile = [JPVideoPlayerCacheFile cacheFileWithFilePath:[JPVideoPlayerCachePath createVideoFileIfNeedThenFetchItForKey:key]
+                                                     indexFilePath:[JPVideoPlayerCachePath createVideoIndexFileIfNeedThenFetchItForKey:key]];
     }
     return self;
 }
 
 
-#pragma mark - Public
-
-- (void)didReceivedDataCacheInDiskByTempPath:(NSString * _Nonnull)tempCacheVideoPath videoFileExceptSize:(NSUInteger)expectedSize videoFileReceivedSize:(NSUInteger)receivedSize{
-    self.tempCacheVideoPath = tempCacheVideoPath;
-    self.expectedSize = expectedSize;
-    self.receivedSize = receivedSize;
-    
-    [self internalPendingRequests];
-}
-
-- (void)didCachedVideoDataFinishedFromWebFullVideoCachePath:(NSString * _Nullable)fullVideoCachePath{
-    self.tempCacheVideoPath = fullVideoCachePath;
-    self.receivedSize = self.expectedSize;
-    [self internalPendingRequests];
-}
-
-
 #pragma mark - AVAssetResourceLoaderDelegate
 
-- (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest{
+- (BOOL)resourceLoader:(AVAssetResourceLoader *)resourceLoader
+shouldWaitForLoadingOfRequestedResource:(AVAssetResourceLoadingRequest *)loadingRequest {
     if (resourceLoader && loadingRequest){
-        [self.pendingRequests addObject:loadingRequest];
-        [self internalPendingRequests];
+        [self.loadingRequests addObject:loadingRequest];
+        JPDebugLog(@"ResourceLoader 接收到新的请求, 当前请求数: %ld <<<<<<<<<<<<<<", self.loadingRequests.count);
+        if(!self.runningLoadingRequest){
+            [self findAndStartNextLoadingRequestIfNeed];
+        }
     }
     return YES;
 }
 
-- (void)resourceLoader:(AVAssetResourceLoader *)resourceLoader didCancelLoadingRequest:(AVAssetResourceLoadingRequest *)loadingRequest{
-    [self.pendingRequests removeObject:loadingRequest];
+- (void)resourceLoader:(AVAssetResourceLoader *)resourceLoader
+didCancelLoadingRequest:(AVAssetResourceLoadingRequest *)loadingRequest {
+    if ([self.loadingRequests containsObject:loadingRequest]) {
+        if(loadingRequest == self.runningLoadingRequest){
+            JPDebugLog(@"取消了一个正在进行的请求");
+            if(self.runningLoadingRequest && self.runningRequestTask){
+                [self.runningRequestTask cancel];
+            }
+            if([self.loadingRequests containsObject:self.runningLoadingRequest]){
+                [self.loadingRequests removeObject:self.runningLoadingRequest];
+            }
+            [self removeCurrentRequestTaskAndResetAll];
+            [self findAndStartNextLoadingRequestIfNeed];
+        }
+        else {
+            JPDebugLog(@"取消了一个不在进行的请求");
+            [self.loadingRequests removeObject:loadingRequest];
+        }
+    }
+    else {
+        JPDebugLog(@"要取消的请求已经完成了");
+    }
+}
+
+
+#pragma mark - JPResourceLoadingRequestTaskDelegate
+
+- (void)requestTask:(JPResourceLoadingRequestTask *)requestTask
+didCompleteWithError:(NSError *)error {
+    if (error.code == NSURLErrorCancelled) {
+        return;
+    }
+    if (![self.requestTasks containsObject:requestTask]) {
+        JPDebugLog(@"完成的 task 不是正在进行的 task");
+        return;
+    }
+
+    if (error) {
+        [self finishCurrentRequestWithError:error];
+    }
+    else {
+        [self finishCurrentRequestWithError:nil];
+    }
+}
+
+
+#pragma mark - Finish Request
+
+- (void)finishCurrentRequestWithError:(NSError *)error {
+    if (error) {
+        JPDebugLog(@"ResourceLoader 完成一个请求 error: %@", error);
+        [self.runningRequestTask.loadingRequest finishLoadingWithError:error];
+        [self.loadingRequests removeObject:self.runningLoadingRequest];
+        [self removeCurrentRequestTaskAndResetAll];
+        [self findAndStartNextLoadingRequestIfNeed];
+    }
+    else {
+        JPDebugLog(@"ResourceLoader 完成一个请求, 没有错误");
+        // 要所有的请求都完成了才行.
+        [self.requestTasks removeObject:self.runningRequestTask];
+        if(!self.requestTasks.count){ // 全部完成.
+            [self.runningRequestTask.loadingRequest finishLoading];
+            [self.loadingRequests removeObject:self.runningLoadingRequest];
+            [self removeCurrentRequestTaskAndResetAll];
+            [self findAndStartNextLoadingRequestIfNeed];
+        }
+        else { // 完成了一部分, 继续请求.
+            [self startNextTaskIfNeed];
+        }
+    }
 }
 
 
 #pragma mark - Private
 
-- (void)internalPendingRequests{
-    
-    // Enumerate all loadingRequest
-    // For every singal loadingRequest, combine response-data length and file mimeType
-    // Then judge the download file data is contain the loadingRequest's data or not, if Yes, take out the request's data and return to loadingRequest, next to colse this loadingRequest. if No, continue wait for download finished.
-    
-    NSError *error;
-    NSData *tempVideoData = [NSData dataWithContentsOfFile:_tempCacheVideoPath options:NSDataReadingMappedIfSafe error:&error];
-    if (!error) {
-        NSMutableArray *requestsCompleted = [NSMutableArray array];
-        @autoreleasepool {
-            for (AVAssetResourceLoadingRequest *loadingRequest in self.pendingRequests) {
-                [self fillInContentInformation:loadingRequest.contentInformationRequest];
-                
-                BOOL didRespondFinished = [self respondWithDataForRequest:loadingRequest andTempVideoData:tempVideoData];
-                if (didRespondFinished) {
-                    [requestsCompleted addObject:loadingRequest];
-                    [loadingRequest finishLoading];
+- (void)findAndStartNextLoadingRequestIfNeed {
+    if(self.runningLoadingRequest || self.runningRequestTask){
+        return;
+    }
+    if (self.loadingRequests.count == 0) {
+        return;
+    }
+
+    self.runningLoadingRequest = [self.loadingRequests firstObject];
+    NSRange dataRange = [self fetchRequestRangeWithRequest:self.runningLoadingRequest];
+    if (dataRange.length == NSUIntegerMax) {
+        dataRange.length = [self.cacheFile fileLength] - dataRange.location;
+    }
+    [self startCurrentRequestWithLoadingRequest:self.runningLoadingRequest
+                                          range:dataRange];
+}
+
+- (void)startCurrentRequestWithLoadingRequest:(AVAssetResourceLoadingRequest *)loadingRequest
+                                        range:(NSRange)dataRange {
+    /// 是否已经完全缓存完成.
+    BOOL isCompleted = self.cacheFile.isCompleted;
+    JPDebugLog(@"ResourceLoader 处理新的请求, 数据范围是: %@, 是否已经缓存完成: %@", NSStringFromRange(dataRange), isCompleted ? @"是" : @"否");
+    if (dataRange.length == NSUIntegerMax) {
+        [self addTaskWithLoadingRequest:loadingRequest
+                                  range:NSMakeRange(dataRange.location, NSUIntegerMax)
+                                 cached:NO];
+    }
+    else {
+        NSUInteger start = dataRange.location;
+        NSUInteger end = NSMaxRange(dataRange);
+        while (start < end) {
+            NSRange firstNotCachedRange = [self.cacheFile firstNotCachedRangeFromPosition:start];
+            if (!JPValidFileRange(firstNotCachedRange)) {
+                [self addTaskWithLoadingRequest:loadingRequest
+                                          range:dataRange
+                                         cached:self.cacheFile.cachedDataBound > 0];
+                start = end;
+            }
+            else if (firstNotCachedRange.location >= end) {
+                [self addTaskWithLoadingRequest:loadingRequest
+                                          range:dataRange
+                                         cached:YES];
+                start = end;
+            }
+            else if (firstNotCachedRange.location >= start) {
+                if (firstNotCachedRange.location > start) {
+                    [self addTaskWithLoadingRequest:loadingRequest
+                                              range:NSMakeRange(start, firstNotCachedRange.location - start)
+                                             cached:YES];
                 }
+                NSUInteger notCachedEnd = MIN(NSMaxRange(firstNotCachedRange), end);
+                [self addTaskWithLoadingRequest:loadingRequest
+                                          range:NSMakeRange(firstNotCachedRange.location, notCachedEnd - firstNotCachedRange.location)
+                                         cached:NO];
+                start = notCachedEnd;
+            }
+            else {
+                [self addTaskWithLoadingRequest:loadingRequest
+                                          range:dataRange
+                                         cached:YES];
+                start = end;
             }
         }
-        if (requestsCompleted.count) {
-            [self.pendingRequests removeObjectsInArray:[requestsCompleted copy]];
+    }
+
+
+    // 发起请求.
+    [self startNextTaskIfNeed];
+}
+
+- (void)addTaskWithLoadingRequest:(AVAssetResourceLoadingRequest *)loadingRequest
+                            range:(NSRange)range
+                           cached:(BOOL)cached {
+    JPResourceLoadingRequestTask *task;
+    if(cached){
+        JPDebugLog(@"ResourceLoader 创建了一个本地请求");
+        task = [JPResourceLoadingRequestLocalTask requestTaskWithLoadingRequest:loadingRequest
+                                                                   requestRange:range
+                                                                      cacheFile:self.cacheFile
+                                                                      customURL:self.customURL
+                                                                         cached:cached];
+    }
+    else {
+        task = [JPResourceLoadingRequestWebTask requestTaskWithLoadingRequest:loadingRequest
+                                                                 requestRange:range
+                                                                    cacheFile:self.cacheFile
+                                                                    customURL:self.customURL
+                                                                       cached:cached];
+        JPDebugLog(@"ResourceLoader 创建一个网络请求: %@", task);
+        if (self.delegate && [self.delegate respondsToSelector:@selector(resourceLoader:didReceiveLoadingRequestTask:)]) {
+            [self.delegate resourceLoader:self didReceiveLoadingRequestTask:(JPResourceLoadingRequestWebTask *)task];
         }
     }
+    int lock = pthread_mutex_trylock(&_lock);
+    task.delegate = self;
+    if (!self.requestTasks) {
+        self.requestTasks = [@[] mutableCopy];
+    }
+    [self.requestTasks addObject:task];
+    if (!lock) {
+        pthread_mutex_unlock(&_lock);
+    }
 }
 
-- (BOOL)respondWithDataForRequest:(AVAssetResourceLoadingRequest *)loadingRequest andTempVideoData:(NSData * _Nullable)tempVideoData{
-    
-    // Thanks for @DrunkenMouse(http://www.jianshu.com/users/5d853d21f7da/latest_articles) submmit a bug that my mistake of calculate "endOffset".
-    // Thanks for Nick Xu Mark.
-    
-    AVAssetResourceLoadingDataRequest *dataRequest = loadingRequest.dataRequest;
-    
-    NSUInteger startOffset = (NSUInteger)dataRequest.requestedOffset;
-    if (dataRequest.currentOffset!=0) {
-        startOffset = (NSUInteger)dataRequest.currentOffset;
-    }
-    startOffset = MAX(0, startOffset);
-    
-    // Don't have any data at all for this reques
-    if (self.receivedSize<startOffset) {
-        return NO;
-    }
-    
-    NSUInteger unreadBytes = self.receivedSize - startOffset;
-    unreadBytes = MAX(0, unreadBytes);
-    NSUInteger numberOfBytesToRespondWith = MIN((NSUInteger)dataRequest.requestedLength, unreadBytes);
-    NSRange respondRange = NSMakeRange(startOffset, numberOfBytesToRespondWith);
-    if (tempVideoData.length>=numberOfBytesToRespondWith) {
-        [dataRequest respondWithData:[tempVideoData subdataWithRange:respondRange]];
-    }
-    
-    long long endOffset = startOffset + dataRequest.requestedLength;
-    
-    // if the received data greater than the requestLength.
-    if (_receivedSize >= endOffset) {
-        return YES;
-    }
-    // if the received data less than the requestLength.
-    return NO;
+- (void)removeCurrentRequestTaskAndResetAll {
+    self.runningLoadingRequest = nil;
+    self.requestTasks = [@[] mutableCopy];
+    self.runningRequestTask = nil;
 }
 
-- (void)fillInContentInformation:(AVAssetResourceLoadingContentInformationRequest * _Nonnull)contentInformationRequest{
-    if (contentInformationRequest) {
-        NSString *mimetype = JPVideoPlayerMimeType;
-        CFStringRef contentType = UTTypeCreatePreferredIdentifierForTag(kUTTagClassMIMEType, (__bridge CFStringRef _Nonnull)(mimetype), NULL);
-        contentInformationRequest.byteRangeAccessSupported = YES;
-        contentInformationRequest.contentType = CFBridgingRelease(contentType);
-        contentInformationRequest.contentLength = self.expectedSize;
+- (void)startNextTaskIfNeed {
+    int lock = pthread_mutex_trylock(&_lock);;
+    self.runningRequestTask = self.requestTasks.firstObject;
+    if ([self.runningRequestTask isKindOfClass:[JPResourceLoadingRequestLocalTask class]]) {
+        [self.runningRequestTask startOnQueue:self.ioQueue];
     }
+    else {
+        [self.runningRequestTask start];
+    }
+    if (!lock) {
+        pthread_mutex_unlock(&_lock);
+    }
+}
+
+- (NSRange)fetchRequestRangeWithRequest:(AVAssetResourceLoadingRequest *)loadingRequest {
+    NSUInteger location, length;
+    // data range.
+    if ([loadingRequest.dataRequest respondsToSelector:@selector(requestsAllDataToEndOfResource)] && loadingRequest.dataRequest.requestsAllDataToEndOfResource) {
+        location = (NSUInteger)loadingRequest.dataRequest.requestedOffset;
+        length = NSUIntegerMax;
+    }
+    else {
+        location = (NSUInteger)loadingRequest.dataRequest.requestedOffset;
+        length = loadingRequest.dataRequest.requestedLength;
+    }
+    if(loadingRequest.dataRequest.currentOffset > 0){
+        location = (NSUInteger)loadingRequest.dataRequest.currentOffset;
+    }
+    return NSMakeRange(location, length);
 }
 
 @end

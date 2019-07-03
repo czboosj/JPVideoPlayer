@@ -5,69 +5,55 @@
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
  *
- * Click https://github.com/Chris-Pan
+ * Click https://github.com/newyjp
  * or http://www.jianshu.com/users/e2f2d779c022/latest_articles to contact me.
  */
-
 
 #import <Foundation/Foundation.h>
 #import "JPVideoPlayerCompat.h"
 
-typedef NS_OPTIONS(NSUInteger, JPVideoPlayerDownloaderOptions) {
-    
-    /**
-     * Call completion block with nil video/videoData if the image was read from NSURLCache
-     * (to be combined with `JPVideoPlayerDownloaderUseNSURLCache`).
-     */
-    JPVideoPlayerDownloaderIgnoreCachedResponse = 1 << 0,
-    
-    /**
-     * In iOS 4+, continue the download of the video if the app goes to background. This is achieved by asking the system for
-     * extra time in background to let the request finish. If the background task expires the operation will be cancelled.
-     */
-    JPVideoPlayerDownloaderContinueInBackground = 1 << 1,
-    
-    /**
-     * Handles cookies stored in NSHTTPCookieStore by setting
-     * NSMutableURLRequest.HTTPShouldHandleCookies = YES;
-     */
-    JPVideoPlayerDownloaderHandleCookies = 1 << 2,
-    
-    /**
-     * Enable to allow untrusted SSL certificates.
-     * Useful for testing purposes. Use with caution in production.
-     */
-    JPVideoPlayerDownloaderAllowInvalidSSLCertificates = 1 << 3,
-    
-    /**
-     * Use this flag to display progress view when play video from web.
-     */
-    JPVideoPlayerDownloaderShowProgressView = 1 << 4,
-    
-    /**
-     * Use this flag to display activity indicator view when video player is buffering.
-     */
-    JPVideoPlayerDownloaderShowActivityIndicatorView = 1 << 5,
-};
+NS_ASSUME_NONNULL_BEGIN
 
-typedef void(^JPVideoPlayerDownloaderProgressBlock)(NSData * _Nullable data, NSInteger receivedSize, NSInteger expectedSize, NSString *_Nullable tempCachedVideoPath, NSURL * _Nullable targetURL);
+@class JPVideoPlayerDownloader, JPResourceLoadingRequestTask;
+@class JPResourceLoadingRequestWebTask;
 
-typedef void(^JPVideoPlayerDownloaderErrorBlock)(NSError *_Nullable error);
+@protocol JPVideoPlayerDownloaderDelegate<NSObject>
 
-typedef NSDictionary<NSString *, NSString *> JPHTTPHeadersDictionary;
-
-typedef NSMutableDictionary<NSString *, NSString *> JPHTTPHeadersMutableDictionary;
-
-typedef JPHTTPHeadersDictionary * _Nullable (^JPVideoPlayerDownloaderHeadersFilterBlock)(NSURL * _Nullable url, JPHTTPHeadersDictionary * _Nullable headers);
+@optional
 
 /**
- *  A token associated with each download. Can be used to cancel a download.
+ * This method will be called when received response from web,
+ * this method will execute on main-thread.
+ *
+ * @param downloader The current instance.
+ * @param response   The response content.
  */
-@interface JPVideoPlayerDownloadToken : NSObject
+- (void)downloader:(JPVideoPlayerDownloader *)downloader
+didReceiveResponse:(NSURLResponse *)response;
 
-@property (nonatomic, strong, nullable) NSURL *url;
+/**
+ * This method will be called when received data.
+ * this method will execute on any-thread.
+ *
+ * @param downloader   The current instance.
+ * @param data         The received new data.
+ * @param receivedSize The size of received data.
+ * @param expectedSize The expexted size of request.
+ */
+- (void)downloader:(JPVideoPlayerDownloader *)downloader
+    didReceiveData:(NSData *)data
+      receivedSize:(NSUInteger)receivedSize
+      expectedSize:(NSUInteger)expectedSize;
 
-@property (nonatomic, strong, nullable) id downloadOperationCancelToken;
+/**s
+ * This method will be called when request completed or some error happened other situations.
+ * this method will execute on main-thread.
+ *
+ * @param downloader The current instance.
+ * @param error      The error when request, maybe nil if successed.
+ */
+- (void)downloader:(JPVideoPlayerDownloader *)downloader
+didCompleteWithError:(NSError *)error;
 
 @end
 
@@ -89,12 +75,36 @@ typedef JPHTTPHeadersDictionary * _Nullable (^JPVideoPlayerDownloaderHeadersFilt
 @property (strong, nonatomic, nullable) NSString *password;
 
 /**
- * Set filter to pick headers for downloading image HTTP request.
- *
- * This block will be invoked for each downloading image request, returned
- * NSDictionary will be used as headers in corresponding HTTP request.
+ *  The timeout value (in seconds) for the download operation. Default: 15.0s.
  */
-@property (nonatomic, copy, nullable) JPVideoPlayerDownloaderHeadersFilterBlock headersFilter;
+@property (assign, nonatomic) NSTimeInterval downloadTimeout;
+
+/**
+ * The current url, may nil if no download operation.
+ */
+@property (nonatomic, weak, readonly, nullable) JPResourceLoadingRequestWebTask *runningTask;
+
+/**
+ * The current downloaderOptions, may nil if no download operation.
+ */
+@property (nonatomic, assign, readonly) JPVideoPlayerDownloaderOptions downloaderOptions;
+
+@property (nonatomic, weak) id<JPVideoPlayerDownloaderDelegate> delegate;
+
+
+/**
+ * @brief Customize acceptable response MIMETypes.
+ *
+ * @discussion
+ *
+ * Original acceptable MIMEType is just `audio` and `video`, but there are some
+ * other kind of MIMETypes, such as `application/oct-stream` and so on.
+ *
+ * @param types
+ *
+ * The supported MIMETypes.
+ */
++ (void)registerSupportedMIMETypes:(NSArray<NSString *> *)types;
 
 /**
  * Creates an instance of a downloader with specified session configuration.
@@ -109,49 +119,20 @@ typedef JPHTTPHeadersDictionary * _Nullable (^JPVideoPlayerDownloaderHeadersFilt
  *  @return global shared instance of downloader class.
  */
 + (nonnull instancetype)sharedDownloader;
-
 /**
- * Set a value for a HTTP header to be appended to each download HTTP request.
+ * Start download video data for given url.
  *
- * @param value The value for the header field. Use `nil` value to remove the header.
- * @param field The name of the header field to set.
+ * @param requestTask     A abstract instance packageing the loading request.
+ * @param downloadOptions The options to be used for this download.
  */
-- (void)setValue:(nullable NSString *)value forHTTPHeaderField:(nullable NSString *)field;
+- (void)downloadVideoWithRequestTask:(JPResourceLoadingRequestWebTask *)requestTask
+                     downloadOptions:(JPVideoPlayerDownloaderOptions)downloadOptions;
 
 /**
- * Returns the value of the specified HTTP header field.
- *
- * @return The value associated with the header field field, or `nil` if there is no corresponding header field.
+ * Cancel current download task.
  */
-- (nullable NSString *)valueForHTTPHeaderField:(nullable NSString *)field;
-
-/**
- *  The timeout value (in seconds) for the download operation. Default: 15.0.
- */
-@property (assign, nonatomic) NSTimeInterval downloadTimeout;
-
-/**
- * Creates a JPVideoPlayerDownloader async downloader instance with a given URL.
- *
- * @param url            The URL to the video to download.
- * @param options        The options to be used for this download.
- * @param progressBlock  A block called repeatedly while the video is downloading.
- * @param errorBlock     A block called once the download happens some error.
- *
- * @return A token (@see JPVideoPlayerDownloadToken) that can be passed to -cancel: to cancel this operation.
- */
-- (nullable JPVideoPlayerDownloadToken *)downloadVideoWithURL:(nullable NSURL *)url options:(JPVideoPlayerDownloaderOptions)options progress:(nullable JPVideoPlayerDownloaderProgressBlock)progressBlock completed:(nullable JPVideoPlayerDownloaderErrorBlock)errorBlock;
-
-/**
- * Cancels a download that was previously queued using -downloadVideoWithURL:options:progress:completed:
- *
- * @param token The token received from -downloadVideoWithURL:options:progress:completed: that should be canceled.
- */
-- (void)cancel:(nullable JPVideoPlayerDownloadToken *)token;
-
-/**
- * Cancels all download operations in the queue.
- */
-- (void)cancelAllDownloads;
+- (void)cancel;
 
 @end
+
+NS_ASSUME_NONNULL_END

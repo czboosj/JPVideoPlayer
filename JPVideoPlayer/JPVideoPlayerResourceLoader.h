@@ -5,30 +5,66 @@
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
  *
- * Click https://github.com/Chris-Pan
+ * Click https://github.com/newyjp
  * or http://www.jianshu.com/users/e2f2d779c022/latest_articles to contact me.
  */
-
 
 #import <Foundation/Foundation.h>
 #import <AVFoundation/AVFoundation.h>
 
-@interface JPVideoPlayerResourceLoader : NSObject<AVAssetResourceLoaderDelegate>
+@class JPVideoPlayerResourceLoader,
+       JPResourceLoadingRequestWebTask,
+       JPVideoPlayerCacheFile;
+
+NS_ASSUME_NONNULL_BEGIN
+
+@protocol JPVideoPlayerResourceLoaderDelegate<NSObject>
+
+@required
 
 /**
- * Call this method to make this instance to handle video data for videoplayer.
+ * This method will be called when the current instance receive new loading request.
  *
- * @param tempCacheVideoPath The cache video data temporary cache path in disk.
- * @param expectedSize         The video data total length.
- * @param receivedSize       The video data cached in disk.
+ * @prama resourceLoader     The current resource loader for videoURLAsset.
+ * @prama requestTask        A abstract instance packaging the loading request.
  */
-- (void)didReceivedDataCacheInDiskByTempPath:(NSString * _Nonnull)tempCacheVideoPath videoFileExceptSize:(NSUInteger)expectedSize videoFileReceivedSize:(NSUInteger)receivedSize;
-
-/**
- * Call this method to change the video path from temporary path to full path.
- *
- * @param fullVideoCachePath the full video file path in disk.
- */
-- (void)didCachedVideoDataFinishedFromWebFullVideoCachePath:(NSString * _Nullable)fullVideoCachePath;
+- (void)resourceLoader:(JPVideoPlayerResourceLoader *)resourceLoader
+didReceiveLoadingRequestTask:(JPResourceLoadingRequestWebTask *)requestTask;
 
 @end
+
+@interface JPVideoPlayerResourceLoader : NSObject<AVAssetResourceLoaderDelegate>
+
+@property (nonatomic, weak) id<JPVideoPlayerResourceLoaderDelegate> delegate;
+
+/**
+ * The url custom passed in.
+ */
+@property (nonatomic, strong, readonly) NSURL *customURL;
+
+/**
+ * The cache file take responsibility for save video data to disk and read cached video from disk.
+ */
+@property (nonatomic, strong, readonly) JPVideoPlayerCacheFile *cacheFile;
+
+/**
+ * Convenience method to fetch instance of this class.
+ *
+ * @param customURL The url custom passed in.
+ *
+ * @return A instance of this class.
+ */
++ (instancetype)resourceLoaderWithCustomURL:(NSURL *)customURL;
+
+/**
+ * Designated initializer method.
+ *
+ * @param customURL The url custom passed in.
+ *
+ * @return A instance of this class.
+ */
+- (instancetype)initWithCustomURL:(NSURL *)customURL NS_DESIGNATED_INITIALIZER;
+
+@end
+
+NS_ASSUME_NONNULL_END

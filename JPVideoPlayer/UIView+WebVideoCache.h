@@ -5,27 +5,21 @@
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
  *
- * Click https://github.com/Chris-Pan
+ * Click https://github.com/newyjp
  * or http://www.jianshu.com/users/e2f2d779c022/latest_articles to contact me.
  */
 
-
-#import <UIKit/UIKit.h>
 #import "JPVideoPlayerManager.h"
-#import "UIView+PlayerStatusAndDownloadIndicator.h"
+#import "JPVideoPlayerSupportUtils.h"
+#import "JPVideoPlayerProtocol.h"
+#import "JPVideoPlayerCompat.h"
+#import "JPVideoPlayerControlViews.h"
 
-typedef NS_ENUM(NSInteger, JPVideoPlayerVideoViewStatus) {
-    JPVideoPlayerVideoViewStatusPortrait,
-    JPVideoPlayerVideoViewStatusLandscape,
-    JPVideoPlayerVideoViewStatusAnimating
-};
-
-typedef void(^JPVideoPlayerScreenAnimationCompletion)(void);
+NS_ASSUME_NONNULL_BEGIN
 
 @protocol JPVideoPlayerDelegate <NSObject>
 
 @optional
-
 /** 
  * Controls which video should be downloaded when the video is not found in the cache.
  *
@@ -42,43 +36,117 @@ typedef void(^JPVideoPlayerScreenAnimationCompletion)(void);
  *
  * @return Return NO to prevent replay for the video. If not implemented, YES is implied.
  */
-- (BOOL)shouldAutoReplayAfterPlayCompleteForURL:(nonnull NSURL *)videoURL;
+- (BOOL)shouldAutoReplayForURL:(nonnull NSURL *)videoURL;
 
 /**
- * Controls the progress view's frame on top or on bottom, by default it is on bottom.
+ * Controls the background color of the video layer before player really start play video.
+ *  by default it is NO, means that the color of the layer is `clearColor`.
  *
- * @return Return YES to take the progress view to top.
+ * @return Return YES to make the background color of the video layer be `blackColor`.
  */
-- (BOOL)shouldProgressViewOnTop;
+- (BOOL)shouldShowBlackBackgroundBeforePlaybackStart;
 
 /**
- * Controls the color of the layer under video palyer. by default it is NO, means that the color of the layer is `clearColor`.
+ * Controls the background color of the video layer when player start play video.
+ *  by default it is YES, means that the color of the layer is `blackColor` when start playing.
  *
- * @return YES to make the color of the layer be `blackColor`.
+ * @return Return NO to make the background color of the video layer be `clearColor`.
  */
-- (BOOL)shouldDisplayBlackLayerBeforePlayStart;
+- (BOOL)shouldShowBlackBackgroundWhenPlaybackStart;
 
 /**
- * Notify the playing status.
+ * Controls the auto hiding of JPVideoPlayerView`s controlContainerView .
+ *  by default it is YES, means that JPVideoPlayerView`s auto hide controlContainerView after a few seconds and show it
+ *  again when user tapping the video playing view.
  *
- * @param playingStatus      The current playing status.
+ * @return Return NO to make the JPVideoPlayerView`s show controlContainerView all the time.
+ *
+ * @warning The `userInteractionEnabled` need be set YES;
  */
-- (void)playingStatusDidChanged:(JPVideoPlayerPlayingStatus)playingStatus;
+- (BOOL)shouldAutoHideControlContainerViewWhenUserTapping;
 
 /**
- * Notify the download progress value. this method will be called on main thread.
- * If the video is local or cached file, this method will be called once and the progress value is 1.0, if video is existed on web, this method will be called when the progress value changed, else if some error happened, this method will never be called.
+ * Controls the Behavior of adding default ControlView / BufferingIndicator / ProgressView when give nil to params.
+ * By default it is YES, which means default views will be added when params given nil.
  *
- * @param downloadingProgress The current download progress value.
+ * @return Return NO to don`t display any view when params are given nil.
  */
-- (void)downloadingProgressDidChanged:(CGFloat)downloadingProgress;
+- (BOOL)shouldShowDefaultControlAndIndicatorViews;
 
 /**
- * Notify the playing progress value. this method will be called on main thread.
+ * Notify the player status.
  *
- * @param playingProgress    The current playing progress value.
+ * @param playerStatus      The current playing status.
  */
-- (void)playingProgressDidChanged:(CGFloat)playingProgress;
+- (void)playerStatusDidChanged:(JPVideoPlayerStatus)playerStatus;
+
+/**
+ * Called when application will resign active.
+ *
+ * @param videoURL The url of the video to be play.
+ */
+- (BOOL)shouldPausePlaybackWhenApplicationWillResignActiveForURL:(NSURL *)videoURL;
+
+/**
+ * Called when application did enter background.
+ *
+ * @param videoURL The url of the video to be play.
+ */
+- (BOOL)shouldPausePlaybackWhenApplicationDidEnterBackgroundForURL:(NSURL *)videoURL;
+
+/**
+ * Called only when application become active from `Control Center`,
+ *  `Notification Center`, `pop UIAlert`, `double click Home-Button`.
+ *
+ * @param videoURL The url of the video to be play.
+ */
+- (BOOL)shouldResumePlaybackWhenApplicationDidBecomeActiveFromResignActiveForURL:(NSURL *)videoURL;
+
+/**
+ * Called only when application become active from `Share to other application`,
+ *  `Enter background`, `Lock screen`.
+ *
+ * @param videoURL The url of the video to be play.
+ */
+- (BOOL)shouldResumePlaybackWhenApplicationDidBecomeActiveFromBackgroundForURL:(NSURL *)videoURL;
+
+/**
+ * Called when call resume play but can not resume play.
+ *
+ * @param videoURL           The url of the video to be play.
+ */
+- (BOOL)shouldTranslateIntoPlayVideoFromResumePlayForURL:(NSURL *)videoURL;
+
+/**
+ * Called when receive audio session interruption notification.
+ *
+ * @param videoURL           The url of the video to be play.
+ */
+- (BOOL)shouldPausePlaybackWhenReceiveAudioSessionInterruptionNotificationForURL:(NSURL *)videoURL;
+
+/**
+ * Called when play video failed.
+ *
+ * @param error    The reason of why play video failed.
+ * @param videoURL The url of the video to be play.
+ */
+- (void)playVideoFailWithError:(NSError *)error
+                      videoURL:(NSURL *)videoURL;
+/**
+ * Provide custom audio session category to play video, `AVAudioSessionCategoryPlayback` by default.
+ *
+ * @return The prefer audio session category.
+ */
+- (AVAudioSessionCategory)preferAudioSessionCategory;
+
+/**
+ * Called when play a already played video, `NO` by default, return `YES` to enable resume playback from a playback record.
+ *
+ * @param videoURL       The url of the video to be play.
+ * @param elapsedSeconds The elapsed seconds last playback recorded.
+ */
+- (BOOL)shouldResumePlaybackFromPlaybackRecordForURL:(NSURL *)videoURL
+                                      elapsedSeconds:(NSTimeInterval)elapsedSeconds;
 
 @end
 
@@ -86,118 +154,205 @@ typedef void(^JPVideoPlayerScreenAnimationCompletion)(void);
 
 #pragma mark - Property
 
-@property(nonatomic, nullable)id<JPVideoPlayerDelegate> jp_videoPlayerDelegate;
+@property (nonatomic, nullable) id<JPVideoPlayerDelegate> jp_videoPlayerDelegate;
 
-/**
- * View status.
- */
-@property(nonatomic, readonly)JPVideoPlayerVideoViewStatus viewStatus;
+@property (nonatomic, readonly) JPVideoPlayViewInterfaceOrientation jp_viewInterfaceOrientation;
 
-/**
- * Playing status of video player.
- */
-@property(nonatomic, readonly)JPVideoPlayerPlayingStatus playingStatus;
+@property (nonatomic, readonly) JPVideoPlayerStatus jp_playerStatus;
+
+@property(nonatomic, strong, readonly, nullable) JPVideoPlayerView *jp_videoPlayerView;
+
+@property (nonatomic, readonly, nullable) UIView<JPVideoPlayerProtocol> *jp_progressView;
+
+@property (nonatomic, readonly, nullable) UIView<JPVideoPlayerProtocol> *jp_controlView;
+
+@property (nonatomic, readonly, nullable) UIView<JPVideoPlayerBufferingProtocol> *jp_bufferingIndicator;
+
+@property(nonatomic, copy, readonly, nullable) NSURL *jp_videoURL;
 
 #pragma mark - Play Video Methods
 
 /**
- * Play `video` with an `url` on the view, and play audio at the same time.
+ * Play a local or web video for given url with no progressView, no controlView, no bufferingIndicator, and play audio at the same time.
  *
  * The download is asynchronous and cached.
- *
- * The progress view will display when downloading, and will display indicator view when buffer empty.
  *
  * @param url The url for the video.
  */
-- (void)jp_playVideoWithURL:(nullable NSURL *)url;
+- (void)jp_playVideoWithURL:(NSURL *)url;
 
 /**
- * Play `video` with an `url` on the view.
+ * Play a local or web video for given url with bufferingIndicator and progressView, and the player is muted.
  *
  * The download is asynchronous and cached.
  *
- * The progress view will hidden when downloading, and will display indicator view when buffer empty.
- *
- * @param url The url for the video.
+ * @param url                     The url for the video.
+ * @param bufferingIndicator      The view show buffering animation when player buffering, should compliance with the `JPVideoPlayerBufferingProtocol`,
+ *                                 it will display default bufferingIndicator if pass nil in. @see `JPVideoPlayerBufferingIndicator`.
+ * @param progressView            The view to display the download and play progress, should compliance with the `JPVideoPlayerProgressProtocol`,
+ *                                 it will display default progressView if pass nil, @see `JPVideoPlayerProgressView`.
+ * @param configuration           The block will be call when video player complete the configuration. because initialize player is not synchronize,
+ *                                 so other category method is disabled before complete the configuration.
  */
-- (void)jp_playVideoHiddenStatusViewWithURL:(nullable NSURL *)url;
+- (void)jp_playVideoMuteWithURL:(NSURL *)url
+             bufferingIndicator:(UIView <JPVideoPlayerBufferingProtocol> *_Nullable)bufferingIndicator
+                   progressView:(UIView <JPVideoPlayerProtocol> *_Nullable)progressView
+                  configuration:(JPPlayVideoConfiguration _Nullable)configuration;
 
 /**
- * Play `video` with an `url` on the view.
+ * Resume play for given url with bufferingIndicator and progressView, and the player is muted.
+ * `Resume` mean that user is playing video in tableView, when user tap the cell of playing video,
+ * user open a detail video viewController that play the same video, but we do not wanna user play the same video from the beginning,
+ * so we use `resume` method to get this goal.
  *
  * The download is asynchronous and cached.
  *
- * Not audio output of the player is muted. Only affects audio muting for the player instance and not for the device.
- *
- * The progress view will hidden when downloading, and will display indicator view when buffer empty.
- *
- * @param url The url for the video.
+ * @param url                     The url for the video.
+ * @param bufferingIndicator      The view show buffering animation when player buffering, should compliance with the `JPVideoPlayerBufferingProtocol`,
+ *                                 it will display default bufferingIndicator if pass nil in. @see `JPVideoPlayerBufferingIndicator`.
+ * @param progressView            The view to display the download and play progress, should compliance with the `JPVideoPlayerProgressProtocol`,
+ *                                 it will display default progressView if pass nil, @see `JPVideoPlayerProgressView`.
+ * @param configuration           The block will be call when video player complete the configuration. because initialize player is not synchronize,
+ *                                 so other category method is disabled before complete the configuration.
  */
-- (void)jp_playVideoMutedHiddenStatusViewWithURL:(nullable NSURL *)url;
+- (void)jp_resumeMutePlayWithURL:(NSURL *)url
+              bufferingIndicator:(UIView <JPVideoPlayerBufferingProtocol> *_Nullable)bufferingIndicator
+                    progressView:(UIView <JPVideoPlayerProtocol> *_Nullable)progressView
+                   configuration:(JPPlayVideoConfiguration _Nullable)configuration;
 
 /**
- * Play `video` with an `url` on the view.
+ * Play a local or web video for given url with bufferingIndicator, controlView, progressView, and play audio at the same time.
  *
  * The download is asynchronous and cached.
  *
- * The progress view will display when downloading, and will display indicator view when buffer empty.
+ * The control view will display, and display indicator view when buffer empty.
  *
- * Not audio output of the player is muted. Only affects audio muting for the player instance and not for the device.
- *
- * @param url The url for the video.
+ * @param url                     The url for the video.
+ * @param bufferingIndicator      The view show buffering animation when player buffering, should compliance with the `JPVideoPlayerBufferingProtocol`,
+ *                                 it will display default bufferingIndicator if pass nil in. @see `JPVideoPlayerBufferingIndicator`.
+ * @param controlView             The view to display the download and play progress, should compliance with the `JPVideoPlayerProgressProtocol`,
+ *                                 it will display default controlView if pass nil, @see `JPVideoPlayerControlView`.
+ * @param progressView            The view to display the download and play progress, should compliance with the `JPVideoPlayerProgressProtocol`,
+ *                                 it will display default progressView if pass nil, @see `JPVideoPlayerProgressView`.
+ * @param configuration           The block will be call when video player complete the configuration. because initialize player is not synchronize,
+ *                                 so other category method is disabled before complete the configuration.
  */
-- (void)jp_playVideoMutedDisplayStatusViewWithURL:(nullable NSURL *)url;
+- (void)jp_playVideoWithURL:(NSURL *)url
+         bufferingIndicator:(UIView <JPVideoPlayerBufferingProtocol> *_Nullable)bufferingIndicator
+                controlView:(UIView <JPVideoPlayerProtocol> *_Nullable)controlView
+               progressView:(UIView <JPVideoPlayerProtocol> *_Nullable)progressView
+              configuration:(JPPlayVideoConfiguration _Nullable)configuration;
 
 /**
- * Play `video` with an `url` on the view.
+ * Resume play for given url with bufferingIndicator, controlView, progressView, and play audio at the same time.
+ * `Resume` mean that user is playing video in tableView, when user tap the cell of playing video,
+ * user open a detail video viewController that play the same video, but we do not wanna user play the same video from the beginning,
+ * so we use `resume` method to get this goal.
  *
  * The download is asynchronous and cached.
  *
- * @param url            The url for the video.
- * @param options        The options to use when downloading the video. @see JPVideoPlayerOptions for the possible values.
- * @param progressBlock  A block called while video is downloading.
- *                       @note the progress block is executed on a background queue.
- * @param completedBlock A block called when operation has been completed. This block has no return value 
- *   and takes the requested video temporary cache path as first parameter. In case of error the fullCacheVideoPath parameter
- *                       is nil and the second parameter may contain an NSError. The third parameter is a enum
- *                       indicating if the video was retrieved from the local cache or from the network.
- *                       The fourth parameter is the original image url.
+ * The control view will display, and display indicator view when buffering empty.
+ *
+ * @param url                     The url for the video.
+ * @param bufferingIndicator      The view show buffering animation when player buffering, should compliance with the `JPVideoPlayerBufferingProtocol`,
+ *                                 it will display default bufferingIndicator if pass nil in. @see `JPVideoPlayerBufferingIndicator`.
+ * @param controlView             The view to display the download and play progress, should compliance with the `JPVideoPlayerProgressProtocol`,
+ *                                 it will display default controlView if pass nil, @see `JPVideoPlayerControlView`.
+ * @param progressView            The view to display the download and play progress, should compliance with the `JPVideoPlayerProgressProtocol`,
+ *                                 it will display default progressView if pass nil, @see `JPVideoPlayerProgressView`.
+ * @param configuration           The block will be call when video player complete the configuration. because initialize player is not synchronize,
+ *                                 so other category method is disabled before complete the configuration.
  */
-- (void)jp_playVideoWithURL:(nullable NSURL *)url
-                           options:(JPVideoPlayerOptions)options
-                          progress:(nullable JPVideoPlayerDownloaderProgressBlock)progressBlock
-                         completed:(nullable JPVideoPlayerCompletionBlock)completedBlock;
+- (void)jp_resumePlayWithURL:(NSURL *)url
+          bufferingIndicator:(UIView <JPVideoPlayerBufferingProtocol> *_Nullable)bufferingIndicator
+                 controlView:(UIView <JPVideoPlayerProtocol> *_Nullable)controlView
+                progressView:(UIView <JPVideoPlayerProtocol> *_Nullable)progressView
+               configuration:(JPPlayVideoConfiguration _Nullable)configuration;
 
-#pragma mark - Play Control
+/**
+ * Play a local or web video with given url.
+ *
+ * The download is asynchronous and cached.
+ *
+ * @param url                     The url for the video.
+ * @param options                 The options to use when downloading the video. @see JPVideoPlayerOptions for the possible values.
+ * @param configuration           The block will be call when video player complete the configuration. because initialize player is not synchronize,
+ *                                 so other category method is disabled before complete the configuration.
+ */
+- (void)jp_playVideoWithURL:(NSURL *)url
+                    options:(JPVideoPlayerOptions)options
+              configuration:(JPPlayVideoConfiguration _Nullable)configuration;
+
+/**
+ * Resume play with given url.
+ * `Resume` mean that user is playing video in tableView, when user tap the cell of playing video,
+ * user open a detail video viewController that play the same video, but we do not wanna user play the same video from the beginning,
+ * so we use `resume` method to get this goal.
+ *
+ * The download is asynchronous and cached.
+ *
+ * @param url                     The url for the video.
+ * @param options                 The options to use when downloading the video. @see JPVideoPlayerOptions for the possible values.
+ * @param configuration           The block will be call when video player complete the configuration. because initialize player is not synchronize,
+ *                                 so other category method is disabled before complete the configuration.
+ */
+- (void)jp_resumePlayWithURL:(NSURL *)url
+                     options:(JPVideoPlayerOptions)options
+               configuration:(JPPlayVideoConfiguration _Nullable)configuration;
+
+#pragma mark - Playback Control
+
+/**
+ * The current playback rate.
+ */
+@property (nonatomic) float jp_rate;
+
+/**
+ * A Boolean value that indicates whether the audio output of the player is muted.
+ */
+@property (nonatomic) BOOL jp_muted;
+
+/**
+ * The audio playback volume for the player, ranging from 0.0 through 1.0 on a linear scale.
+ */
+@property (nonatomic) float jp_volume;
+
+/**
+* Moves the playback cursor.
+*
+* @param time The time where seek to.
+*/
+- (BOOL)jp_seekToTime:(CMTime)time;
+
+/**
+ * Fetch the elapsed seconds of player.
+ */
+- (NSTimeInterval)jp_elapsedSeconds;
+
+/**
+ * Fetch the total seconds of player.
+ */
+- (NSTimeInterval)jp_totalSeconds;
+
+/**
+ *  Call this method to pause playback.
+ */
+- (void)jp_pause;
+
+/**
+ *  Call this method to resume playback.
+ */
+- (void)jp_resume;
+
+/**
+ * @return Returns the current time of the current player item.
+ */
+- (CMTime)jp_currentTime;
 
 /**
  * Call this method to stop play video.
  */
 - (void)jp_stopPlay;
-
-/**
- *  Call this method to pause play.
- */
-- (void)jp_pause;
-
-/**
- *  Call this method to resume play.
- */
-- (void)jp_resume;
-
-/**
- * Call this method to play or pause audio of current video.
- *
- * @param mute the audio status will change to.
- */
-- (void)jp_setPlayerMute:(BOOL)mute;
-
-/**
- * Call this method to get the audio statu for current player.
- *
- * @return the audio status for current player.
- */
-- (BOOL)jp_playerIsMute;
 
 #pragma mark - Landscape Or Portrait Control
 
@@ -209,10 +364,11 @@ typedef void(^JPVideoPlayerScreenAnimationCompletion)(void);
 /**
  * Call this method to enter full screen.
  *
- * @param animated   need landscape animation or not.
- * @param completion call back when landscape finished.
+ * @param flag       Need landscape animation or not.
+ * @param completion Call back when landscape finished.
  */
-- (void)jp_gotoLandscapeAnimated:(BOOL)animated completion:(JPVideoPlayerScreenAnimationCompletion _Nullable)completion;
+- (void)jp_gotoLandscapeAnimated:(BOOL)flag
+                      completion:(dispatch_block_t _Nullable)completion;
 
 /**
  * Call this method to exit full screen.
@@ -222,9 +378,12 @@ typedef void(^JPVideoPlayerScreenAnimationCompletion)(void);
 /**
  * Call this method to exit full screen.
  *
- * @param animated   need portrait animation or not.
- * @param completion call back when portrait finished.
+ * @param flag       Need portrait animation or not.
+ * @param completion Call back when portrait finished.
  */
-- (void)jp_gotoPortraitAnimated:(BOOL)animated completion:(JPVideoPlayerScreenAnimationCompletion _Nullable)completion;
+- (void)jp_gotoPortraitAnimated:(BOOL)flag
+                     completion:(dispatch_block_t _Nullable)completion;
 
 @end
+
+NS_ASSUME_NONNULL_END
